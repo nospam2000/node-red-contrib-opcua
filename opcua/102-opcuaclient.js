@@ -14,6 +14,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 
+ vscode-fold=3
  **/
 
 module.exports = function (RED) {
@@ -44,7 +45,7 @@ module.exports = function (RED) {
     var opcuaEndpoint = RED.nodes.getNode(n.endpoint);
     var userIdentity = {};
     var connectionOption = {};
-    var cmdQueue = []; // queue msgs which can currently not be handled because session is not established, yet and currentStatus is 'connecting'
+    var msgQueue = []; // queue msgs which can currently not be handled because session is not established, yet and currentStatus is 'connecting'
     var currentStatus = ''; // the status value set set by node.status(). Didn't find a way to read it back.
 
     connectionOption.securityPolicy = opcua.SecurityPolicy[opcuaEndpoint.securityPolicy] || opcua.SecurityPolicy.None;
@@ -66,6 +67,13 @@ module.exports = function (RED) {
       return object.topicName;
     }); // multiple monitored Items should be registered only once
 
+    var eventQueue = new async.queue(function (task, callback) {
+      __dumpEvent(task.node, task.session, task.fields, task.eventFields, callback);
+    });
+
+    create_opcua_client(connect_opcua_client);
+
+    // diagnostics and logging
     function verbose_warn(logMessage) {
       if (RED.settings.verbose) {
         node.warn((node.name) ? node.name + ': ' + logMessage : 'OpcUaClientNode: ' + logMessage);
@@ -123,10 +131,6 @@ module.exports = function (RED) {
       }, _callback);
     }
 
-    var eventQueue = new async.queue(function (task, callback) {
-      __dumpEvent(task.node, task.session, task.fields, task.eventFields, callback);
-    });
-
     function dumpEvent(node, session, fields, eventFields, _callback) {
       eventQueue.push({
         node: node,
@@ -137,6 +141,7 @@ module.exports = function (RED) {
       });
     }
 
+    // lifecycle management of node.client and node.session
     function create_opcua_client(callback) {
       node.client = null;
       verbose_warn("create Client ...");
@@ -174,7 +179,7 @@ module.exports = function (RED) {
     function set_node_status_to(statusValue) {
       verbose_log("Client status: " + statusValue);
       var statusParameter = opcuaBasics.get_node_status(statusValue);
-      currentStatus = statusValue;
+      node.currentStatus = statusValue;
       node.status({fill: statusParameter.fill, shape: statusParameter.shape, text: statusParameter.status});
     }
 
@@ -201,10 +206,7 @@ module.exports = function (RED) {
                 node.session.startKeepAliveManager(); // General for read/write/subscriptions/events
                 verbose_log("session active");
                 set_node_status_to("session active");
-                for(var i in cmdQueue) {
-                  processInputMsg(cmdQueue[i]);
-                }
-                cmdQueue = [];
+                processMsgQueue();
                 callback();
               } else {
                 set_node_status_to("session error");
@@ -226,50 +228,7 @@ module.exports = function (RED) {
       });
     }
 
-    function make_subscription(callback, msg, parameters) {
-      var newSubscription = null;
-
-      if (!node.session) {
-        verbose_log("Subscription without session");
-        return newSubscription;
-      }
-
-      if (!parameters) {
-        verbose_log("Subscription without parameters");
-        return newSubscription;
-      }
-
-      newSubscription = new opcua.ClientSubscription(node.session, parameters);
-
-      newSubscription.on("initialized", function () {
-        verbose_log("Subscription initialized");
-        set_node_status_to("initialized");
-      });
-
-      newSubscription.on("started", function () {
-        verbose_log("Subscription subscribed ID: " + newSubscription.subscriptionId);
-        set_node_status_to("subscribed");
-        monitoredItems.clear();
-        callback(newSubscription, msg);
-      });
-
-      newSubscription.on("keepalive", function () {
-        verbose_log("Subscription keepalive ID: " + newSubscription.subscriptionId);
-        set_node_status_to("keepalive");
-      });
-
-      newSubscription.on("terminated", function () {
-        verbose_log("Subscription terminated ID: " + newSubscription.subscriptionId);
-        set_node_status_to("terminated");
-        subscription = null;
-        monitoredItems.clear();
-      });
-
-      return newSubscription;
-    }
-
-    create_opcua_client(connect_opcua_client);
-
+    // input event handling
     function processInputMsg(msg) {
       if (msg.action) {
             verbose_log("Action on msg:" + msg.action);
@@ -283,9 +242,9 @@ module.exports = function (RED) {
       }
 
       if (!node.client || !node.session) {
-        if(currentStatus == 'connecting')
+        if(node.currentStatus == 'connecting')
         {
-          cmdQueue.push(msg);
+          node.msgQueue.push(msg);
         }
         else
         {
@@ -340,7 +299,13 @@ module.exports = function (RED) {
       }
       //node.send(msg); // msg.payload is here actual inject caused wrong values
     }
-    node.on("input", processInputMsg);
+
+    function processMsgQueue() {}
+      for(var i in node.msgQueue) {
+        processInputMsg(node.msgQueue[i]);
+      }
+      node.msgQueue = [];
+    }
 
     function read_action_input(msg) {
 
@@ -542,6 +507,54 @@ module.exports = function (RED) {
       }
     }
 
+    function browse_action_input(msg) {
+      verbose_log("browsing");
+      var NodeCrawler = opcua.NodeCrawler;
+      if (node.session) {
+        var crawler = new NodeCrawler(node.session);
+
+        crawler.read(msg.topic, function (err, obj) {
+          var newMessage = opcuaBasics.buildBrowseMessage(msg.topic);
+          if (!err) {
+            set_node_status_to("active browsing");
+
+            treeify.asLines(obj, true, true, function (line) {
+
+            verbose_log(line);
+            if (line.indexOf("browseName") > 0) {
+              newMessage.browseName = line.substring(line.indexOf("browseName") + 12);
+            }
+            if (line.indexOf("nodeId") > 0) {
+              newMessage.nodeId = line.substring(line.indexOf("nodeId") + 8);
+              newMessage.nodeId = newMessage.nodeId.replace("&#x2F;", "\/");
+            }
+            if (line.indexOf("nodeClass") > 0) {
+              newMessage.nodeClassType = line.substring(line.indexOf("nodeClass") + 11);
+            }
+            if (line.indexOf("typeDefinition") > 0) {
+              newMessage.typeDefinition = line.substring(line.indexOf("typeDefinition") + 16);
+              newMessage.payload = Date.now();
+              node.send(newMessage);
+            }
+
+            set_node_status_to("browse done");
+
+          });
+          } else {
+            node.error(err.message);
+            set_node_status_to("error browsing");
+            reset_opcua_client(connect_opcua_client);
+          }
+        });
+      }
+      else {
+        node.error("Session is not active!");
+        set_node_status_to("Session invalid");
+        reset_opcua_client(connect_opcua_client);
+      }
+    }
+
+    // subscription handling
     function subscribe_action_input(msg) {
       verbose_log("subscribing");
       if (!subscription) {
@@ -580,6 +593,48 @@ module.exports = function (RED) {
           reset_opcua_client(connect_opcua_client);
         }
       }
+    }
+
+    function make_subscription(callback, msg, parameters) {
+      var newSubscription = null;
+
+      if (!node.session) {
+        verbose_log("Subscription without session");
+        return newSubscription;
+      }
+
+      if (!parameters) {
+        verbose_log("Subscription without parameters");
+        return newSubscription;
+      }
+
+      newSubscription = new opcua.ClientSubscription(node.session, parameters);
+
+      newSubscription.on("initialized", function () {
+        verbose_log("Subscription initialized");
+        set_node_status_to("initialized");
+      });
+
+      newSubscription.on("started", function () {
+        verbose_log("Subscription subscribed ID: " + newSubscription.subscriptionId);
+        set_node_status_to("subscribed");
+        monitoredItems.clear();
+        callback(newSubscription, msg);
+      });
+
+      newSubscription.on("keepalive", function () {
+        verbose_log("Subscription keepalive ID: " + newSubscription.subscriptionId);
+        set_node_status_to("keepalive");
+      });
+
+      newSubscription.on("terminated", function () {
+        verbose_log("Subscription terminated ID: " + newSubscription.subscriptionId);
+        set_node_status_to("terminated");
+        subscription = null;
+        monitoredItems.clear();
+      });
+
+      return newSubscription;
     }
 
     function convertAndCheckInterval(interval) {
@@ -719,53 +774,6 @@ module.exports = function (RED) {
         }
     }
 
-    function browse_action_input(msg) {
-      verbose_log("browsing");
-      var NodeCrawler = opcua.NodeCrawler;
-      if (node.session) {
-        var crawler = new NodeCrawler(node.session);
-
-        crawler.read(msg.topic, function (err, obj) {
-          var newMessage = opcuaBasics.buildBrowseMessage(msg.topic);
-          if (!err) {
-            set_node_status_to("active browsing");
-
-            treeify.asLines(obj, true, true, function (line) {
-
-            verbose_log(line);
-            if (line.indexOf("browseName") > 0) {
-              newMessage.browseName = line.substring(line.indexOf("browseName") + 12);
-            }
-            if (line.indexOf("nodeId") > 0) {
-              newMessage.nodeId = line.substring(line.indexOf("nodeId") + 8);
-              newMessage.nodeId = newMessage.nodeId.replace("&#x2F;", "\/");
-            }
-            if (line.indexOf("nodeClass") > 0) {
-              newMessage.nodeClassType = line.substring(line.indexOf("nodeClass") + 11);
-            }
-            if (line.indexOf("typeDefinition") > 0) {
-              newMessage.typeDefinition = line.substring(line.indexOf("typeDefinition") + 16);
-              newMessage.payload = Date.now();
-              node.send(newMessage);
-            }
-
-            set_node_status_to("browse done");
-
-          });
-          } else {
-            node.error(err.message);
-            set_node_status_to("error browsing");
-            reset_opcua_client(connect_opcua_client);
-          }
-        });
-      }
-      else {
-        node.error("Session is not active!");
-        set_node_status_to("Session invalid");
-        reset_opcua_client(connect_opcua_client);
-      }
-    }
-
     function subscribe_monitoredEvent(subscription, msg) {
       verbose_log("Session subscriptionId: " + subscription.subscriptionId);
 
@@ -855,6 +863,8 @@ module.exports = function (RED) {
         }
       }
     }
+
+    node.on("input", processInputMsg);
 
     node.on("close", function () {
       if (subscription && subscription.isActive()) {
