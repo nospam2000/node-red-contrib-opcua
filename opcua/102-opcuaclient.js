@@ -73,7 +73,7 @@ module.exports = function (RED) {
 
     create_opcua_client(connect_opcua_client);
 
-    // diagnostics and logging
+    // tracing
     function verbose_warn(logMessage) {
       if (RED.settings.verbose) {
         node.warn((node.name) ? node.name + ': ' + logMessage : 'OpcUaClientNode: ' + logMessage);
@@ -300,7 +300,7 @@ module.exports = function (RED) {
       //node.send(msg); // msg.payload is here actual inject caused wrong values
     }
 
-    function processMsgQueue() {}
+    function processMsgQueue() {
       for(var i in node.msgQueue) {
         processInputMsg(node.msgQueue[i]);
       }
