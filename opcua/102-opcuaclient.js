@@ -147,6 +147,8 @@ module.exports = function (RED) {
       verbose_warn("create Client ...");
       verbose_log(connectionOption);
       node.client = new opcua.OPCUAClient(connectionOption);
+      //TODO: node.client.on('close', function()    {node.error('NodeClient_OnClose');});
+      //TODO: node.client.on('error', function(err) {node.error('NodeClient_OnError:'+err);});
       items = [];
       node.items = items;
       set_node_status_to("create client");
@@ -864,14 +866,13 @@ module.exports = function (RED) {
       }
     }
 
-    node.on("input", processInputMsg);
-
-    node.on("close", function () {
+    function processClosedEvent(removed, done) {
       if (subscription && subscription.isActive()) {
-        subscription.terminate();
+        subscription.terminate(done);
         // subscription becomes null by its terminated event
       }
 
+      // TODO: only close client when 'removed == true'
       if (node.session) {
         node.session.close(function (err) {
           verbose_log("Session closed");
@@ -881,36 +882,29 @@ module.exports = function (RED) {
           }
 
           node.session = null;
-          close_opcua_client(set_node_status_to("closed"));
+          close_opcua_client(function() {
+            set_node_status_to("closed");
+            done();
+          });
         });
       } else {
         node.session = null;
-        close_opcua_client(set_node_status_to("closed"));
+        close_opcua_client(function() {
+          set_node_status_to("closed");
+          done();
+        });
       }
+    }
+
+    node.on("input", processInputMsg);
+
+    node.on("close", function (removed, done) {
+      processClosedEvent(removed, done);
     });
 
+    // TODO: what is the purpose of this event and who fires it on which conditions?
     node.on("error", function () {
-      if (subscription && subscription.isActive()) {
-        subscription.terminate();
-        // subscription becomes null by its terminated event
-      }
-
-      if (node.session) {
-        node.session.close(function (err) {
-          verbose_log("Session closed on error emit");
-          if (err) {
-            node.error(node.name + " " + err);
-          }
-
-          set_node_status_to("session closed");
-          node.session = null;
-          close_opcua_client(set_node_status_to("node error"));
-        });
-
-      } else {
-        node.session = null;
-        close_opcua_client(set_node_status_to("node error"));
-      }
+      processClosedEvent(false, function() {});
     });
   }
 
