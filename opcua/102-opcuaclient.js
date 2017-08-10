@@ -884,7 +884,7 @@ module.exports = function (RED) {
           node.session = null;
           close_opcua_client(function() {
             set_node_status_to("closed");
-            if(typeof(done == 'function') {
+            if(typeof(done) == 'function') {
               done();
             }
           });
@@ -893,7 +893,7 @@ module.exports = function (RED) {
         node.session = null;
         close_opcua_client(function() {
           set_node_status_to("closed");
-          if(typeof(done == 'function') {
+          if(typeof(done) == 'function') {
             done();
           }
         });
