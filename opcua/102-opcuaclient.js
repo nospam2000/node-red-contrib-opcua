@@ -181,7 +181,7 @@ module.exports = function (RED) {
     function set_node_status_to(statusValue) {
       verbose_log("Client status: " + statusValue);
       var statusParameter = opcuaBasics.get_node_status(statusValue);
-      node.currentStatus = statusValue;
+      currentStatus = statusValue;
       node.status({fill: statusParameter.fill, shape: statusParameter.shape, text: statusParameter.status});
     }
 
@@ -244,9 +244,9 @@ module.exports = function (RED) {
       }
 
       if (!node.client || !node.session) {
-        if(node.currentStatus == 'connecting')
+        if(currentStatus == 'connecting')
         {
-          node.msgQueue.push(msg);
+          msgQueue.push(msg);
         }
         else
         {
@@ -303,10 +303,10 @@ module.exports = function (RED) {
     }
 
     function processMsgQueue() {
-      for(var i in node.msgQueue) {
-        processInputMsg(node.msgQueue[i]);
+      for(var i in msgQueue) {
+        processInputMsg(msgQueue[i]);
       }
-      node.msgQueue = [];
+      msgQueue = [];
     }
 
     function read_action_input(msg) {
@@ -884,14 +884,18 @@ module.exports = function (RED) {
           node.session = null;
           close_opcua_client(function() {
             set_node_status_to("closed");
-            done();
+            if(typeof(done == 'function') {
+              done();
+            }
           });
         });
       } else {
         node.session = null;
         close_opcua_client(function() {
           set_node_status_to("closed");
-          done();
+          if(typeof(done == 'function') {
+            done();
+          }
         });
       }
     }
